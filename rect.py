@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-
+import numpy as np
 class Rect:
     """Common class for both ground truth objects and hypothesis objects"""
 
@@ -34,6 +34,9 @@ class Rect:
         box["height"] = max(0, min(self.y_ + self.h_, o.y_ + o.h_) - box["y"])
         box["id"] = "intersect"
         return Rect(box)
+
+    def euclidDist(self, o):
+        return np.sqrt((self.x_ - o.x_) ** 2 + (self.y_ - o.y_) ** 2)
 
     def overlap(self, o):
         """Overlap of this and other Rect o"""

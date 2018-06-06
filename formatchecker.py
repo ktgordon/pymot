@@ -1,4 +1,4 @@
-from utilities import write_stderr_red
+from .utilities import write_stderr_red
 
 class FormatChecker:
 

@@ -3,21 +3,21 @@
 import sys
 import json
 import argparse
-from munkres import Munkres
-from rect import Rect
-from importers import MOT_hypo_import
-from importers import MOT_groundtruth_import
-from formatchecker import FormatChecker
-from utilities import write_stderr_red
+from munkres import munkres
+from .rect import Rect
+from .importers import MOT_hypo_import
+from .importers import MOT_groundtruth_import
+from .formatchecker import FormatChecker
+from .utilities import write_stderr_red
 import logging
+import numpy as np
+logging.basicConfig(format='%(levelname)s:%(message)s', level=logging.WARNING)
 LOG = logging.getLogger(__name__)
-
 
 class MOTEvaluation:
 
     def __init__(self, groundtruth, hypotheses, overlap_threshold):
         """Constructor """
-        
         self.overlap_threshold_ = overlap_threshold
         """Bounding box overlap threshold"""
     
@@ -31,17 +31,23 @@ class MOTEvaluation:
         """Groundtruth. See groundtruth.json for a sample file"""
         
         if self.groundtruth_["class"] != "video":
-            raise Exception, "Ground truth is not of class \"video\""
+            print("Ground truth is not of class \"video\"")
+            raise Exception
         
         self.hypotheses_ = hypotheses
         """Hypotheses. See hypotheses.json for a sample file"""
         
         if self.hypotheses_["class"] != "video":
-            raise Exception, "Hypotheses is not of class \"video\""
+            print("Hypotheses is not of class \"video\"")
+            raise Exception
 
         self.convertIDsToString()
 
         self.resetStatistics()
+
+        ''' For debugging, store the particle IDs of false positive '''
+        self.false_positive_ids = set()
+
 
         # Set class and type for hypos and ground truths
         for f in self.hypotheses_["frames"]:
@@ -67,11 +73,13 @@ class MOTEvaluation:
 
         # Hypotheses frames which are chronologically close to timestamp 
         # Use binary search, if this is to slow for you :)P
-        hypotheses_frames = filter(hypothesis_frame_chronologically_close, self.hypotheses_["frames"])
+        hypotheses_frames = list(filter(hypothesis_frame_chronologically_close, self.hypotheses_["frames"]))
         
         # We expect at most one hypotheses timestamp.
         if len(hypotheses_frames) > 1:
-            raise Exception, "> 1 hypotheses timestamps found for timestamp %f with sync delta %f" % (timestamp, self.sync_delta_)
+            print("> 1 hypotheses timestamps found for timestamp %f with sync delta %f" % (timestamp, self.sync_delta_))
+            raise Exception
+            
 
         if len(hypotheses_frames) == 0:
 #            write_stderr_red("Warning:", "No hypothesis timestamp found for timestamp %f with sync delta %f" % (timestamp, self.sync_delta_))
@@ -92,6 +100,7 @@ class MOTEvaluation:
         """Update statistics by evaluating a new frame."""
 
         timestamp = frame["timestamp"]
+        # print("frame:",timestamp)
         groundtruths = frame["annotations"]
         hypotheses = self.get_hypotheses_frame(timestamp)["hypotheses"]
 
@@ -104,7 +113,7 @@ class MOTEvaluation:
         # Save occuring hypothesis ids
         for h in hypotheses:
             self.hypothesis_ids_.add(h["id"])
-        
+        self.LOG = LOG
         LOG.info("")
         LOG.info("Timestamp: %s" % timestamp)
         
@@ -141,26 +150,32 @@ class MOTEvaluation:
 #            print "DIFF Keep correspondence"
             
         for gt_id in self.mappings_.keys():
-            groundtruth = filter(lambda g: g["id"] == gt_id, groundtruths) # Get ground truths with given ground truth id in current frame
+            
+            groundtruth = list(filter(lambda g: g["id"] == gt_id, groundtruths)) # Get ground truths with given ground truth id in current frame
             if len(groundtruth) > 1:
                 LOG.warning("found %d > 1 ground truth tracks for id %s", len(groundtruth), gt_id)
-            elif len(groundtruth) < 1:
+            elif len(groundtruth) < 1:                
                 continue
             
-            hypothesis = filter(lambda h: h["id"] == self.mappings_[gt_id], hypotheses) # Get hypothesis with hypothesis id according to mapping
+            hypothesis = list(filter(lambda h: h["id"] == self.mappings_[gt_id], hypotheses)) # Get hypothesis with hypothesis id according to mapping
             assert len(hypothesis) <= 1
-            if len(hypothesis) != 1:
+            if len(hypothesis) != 1:               
                 continue
             
             # Hypothesis found for known mapping
             # Check hypothesis for overlap
-            overlap = Rect(groundtruth[0]).overlap(Rect(hypothesis[0]))
-            if overlap >= self.overlap_threshold_:
+            # overlap = Rect(groundtruth[0]).overlap(Rect(hypothesis[0])) <- original
+            overlap = Rect(groundtruth[0]).euclidDist(Rect(hypothesis[0])) # <- added by kg
+
+            # NOTE: changed >= to <= to accomodate overlap to euclidDist change
+            if overlap <= self.overlap_threshold_:
                 LOG.info("Keeping correspondence between %s and %s" % (groundtruth[0]["id"], hypothesis[0]["id"]))
 #                    print "DIFF Keep corr %s %s %.2f" % (groundtruth[0]["id"], hypothesis[0]["id"], Rect(groundtruth[0]).overlap(Rect(hypothesis[0])))
-                listofprints.append("DIFF Keep corr %s %s %.2f" % (groundtruth[0]["id"], hypothesis[0]["id"], Rect(groundtruth[0]).overlap(Rect(hypothesis[0]))))
+                # listofprints.append("DIFF Keep corr %s %s %.2f" % (groundtruth[0]["id"], hypothesis[0]["id"], Rect(groundtruth[0]).overlap(Rect(hypothesis[0])))) <- original
+                listofprints.append("DIFF Keep corr %s %s %.2f" % (groundtruth[0]["id"], hypothesis[0]["id"], Rect(groundtruth[0]).euclidDist(Rect(hypothesis[0])))) # <- added by kg
                 correspondences[gt_id] = hypothesis[0]["id"]
-                self.total_overlap_ += overlap
+                
+                self.total_overlap_ += overlap                
 
         
         for p in sorted(listofprints):
@@ -193,11 +208,16 @@ class MOTEvaluation:
                 
                 rect_groundtruth = Rect(groundtruth)
                 rect_hypothesis = Rect(hypothesis)
-                overlap = rect_groundtruth.overlap(rect_hypothesis)
-                
-                if overlap >= self.overlap_threshold_:
+                # overlap = rect_groundtruth.overlap(rect_hypothesis) <- original
+                overlap = rect_groundtruth.euclidDist(rect_hypothesis) # <- added by kg
+
+                # NOTE: changed >= to <= to accomodate overlap to euclidDist change
+                if overlap <= self.overlap_threshold_:
 #                        print "Fill Hungarian", rect_groundtruth, rect_hypothesis, overlap
-                    munkres_matrix[i][j] = 1 / overlap
+
+                    # NOTE: changed 1 / overlap to overlap to accomodate overlap to euclidDist change
+                    # munkres_matrix[i][j] = 1 / overlap
+                    munkres_matrix[i][j] = overlap
                     LOG.info("DIFF candidate %s %s %.2f" % (groundtruth["id"], hypothesis["id"], overlap))
         
         # Do the Munkres
@@ -205,8 +225,12 @@ class MOTEvaluation:
         
         # Only run munkres on non-empty matrix
         if len(munkres_matrix) > 0:
-            m = Munkres()
-            indices = m.compute(munkres_matrix)
+            indices = munkres(np.array(munkres_matrix, dtype=np.float64))
+            indices = np.nonzero(indices)
+            indices = np.array(indices).T
+            # print(indices)
+            indices = [tuple(i) for i in indices]
+            
         else:
             LOG.info("No need to run Hungarian with %d ground truths and %d hypothesis." % (len(groundtruths), len(hypotheses)))
             indices = []
@@ -231,12 +255,16 @@ class MOTEvaluation:
             
             
             # Add to correspondences
-            LOG.info("Correspondence found: %s and %s (overlap: %f)" % (gt_id, hypo_id, 1.0 / munkres_matrix[gt_index][hypo_index]))
+            eps = 0.0000001
+            # LOG.info("Correspondence found: %s and %s (overlap: %f)" % (gt_id, hypo_id, 1.0 / munkres_matrix[gt_index][hypo_index]))
 #                correspondencelist.append("DIFF correspondence %s %s %.2f" % (gt_id, hypo_id, 1.0 / munkres_matrix[gt_index][hypo_index]))
             correspondencelist.append("DIFF correspondence %s %s" % (gt_id, hypo_id))
             correspondences[gt_id] = hypo_id
+
+            ### KG: Possibly a bug, because this overlap is coming from a previous loop... try to fix with line below
+            overlap = Rect(groundtruths[gt_index]).euclidDist(Rect(hypotheses[hypo_index]))
             self.total_overlap_ += overlap
-            
+
 
             # Count "recoverable" and "non-recoverable" mismatches
             # "recoverable" mismatches
@@ -248,7 +276,7 @@ class MOTEvaluation:
             if hypo_id in self.hypo_map_ and self.hypo_map_[hypo_id] != gt_id:
                 # Do not count non-recoverable mismatch, if both old ground truth and current ground truth are DCO.
                 old_gt_id = self.hypo_map_[hypo_id]
-                old_gt_dco = filter(lambda g: g["id"] == old_gt_id and g.get("dco",False), groundtruths)
+                old_gt_dco = list(filter(lambda g: g["id"] == old_gt_id and g.get("dco",False), groundtruths))
 
                 assert len(old_gt_dco) <= 1;
                 if not (groundtruths[gt_index].get("dco",False) and len(old_gt_dco) == 1):
@@ -264,11 +292,13 @@ class MOTEvaluation:
             # Correspondence: A-1
             # Mapping: A-2, B-1
             # We have to detect both forms of conflicts
-            for mapping_gt_id, mapping_hypo_id in self.mappings_.items():
+            # for mapping_gt_id, mapping_hypo_id in self.mappings_.items():
+            for mapping_gt_id in list(self.mappings_.keys()):
+                mapping_hypo_id = self.mappings_[mapping_gt_id]
                 
                 # CAVE: Other than in perl script:
                 # Do not consider for mismatch, if both old gt and new gt are DCO
-                gt_with_mapping_gt_id_dco = filter(lambda g: g["id"] == mapping_gt_id and g.get("dco",False), groundtruths)
+                gt_with_mapping_gt_id_dco = list(filter(lambda g: g["id"] == mapping_gt_id and g.get("dco",False), groundtruths))
                 if len (gt_with_mapping_gt_id_dco) == 1 and groundtruths[gt_index].get("dco",False):
                     LOG.info("Ground truths %s and %s are DCO. Not considering for mismatch." % (mapping_gt_id, gt_id))
 #                    print "DIFF DCO %s" % (gt_id), groundtruths[gt_index]
@@ -283,8 +313,8 @@ class MOTEvaluation:
                         self.mismatches_ = self.mismatches_ + 1
 
                         # find groundtruth and hypothesis with given ids
-                        g = filter(lambda g: g["id"] == gt_id, groundtruths)
-                        h = filter(lambda h: h["id"] == hypo_id, hypotheses)
+                        g = list(filter(lambda g: g["id"] == gt_id, groundtruths))
+                        h = list(filter(lambda h: h["id"] == hypo_id, hypotheses))
 
                         #assert(len(g) == 1)
                         if len(g) != 1:
@@ -354,6 +384,7 @@ class MOTEvaluation:
             if hypothesis["id"] not in correspondences.values():
                 LOG.info("False positive: %s" % hypothesis["id"])
                 LOG.info("DIFF False positive %s" % hypothesis["id"])
+                self.false_positive_ids.add(hypothesis["id"])
                 self.false_positives_ += 1
                 visualDebugAnnotations.append(hypothesis)
                 hypothesis["class"] = "false positive"
@@ -471,37 +502,37 @@ class MOTEvaluation:
     def printTrackStatistics(self):
         # Lonely ground truths (no single correspondence)
         lonely_ground_truths = self.groundtruth_ids_ - set(self.gt_map_.keys())
-        print "Lonely ground truth tracks %d" % len(lonely_ground_truths)
-        print "Total ground truth tracks  %d" % len(self.groundtruth_ids_)
+        print("Lonely ground truth tracks %d" % len(lonely_ground_truths))
+        print("Total ground truth tracks  %d" % len(self.groundtruth_ids_))
 #        print "    ", lonely_ground_truths
 
         # Dirty false positive tracks (no single correspondence)
         lonely_hypotheses = self.hypothesis_ids_ - set(self.hypo_map_.keys())
-        print "Lonely hypothesis tracks %d" % len(lonely_hypotheses)
-        print "Total hypothesis tracks  %d" % len(self.hypothesis_ids_)
+        print("Lonely hypothesis tracks %d" % len(lonely_hypotheses))
+        print("Total hypothesis tracks  %d" % len(self.hypothesis_ids_))
 #        print "    ", lonely_hypotheses
 
 
     def printResults(self):
         """Print out results"""
         # Additional statistics
-        print "Ground truths               %d" % self.total_groundtruths_
-        print "False positives             %d" % self.false_positives_
-        print "Misses                      %d" % self.misses_
-        print "Mismatches                  %d" % self.mismatches_
-        print "Recoverable mismatches      %d" % self.recoverable_mismatches_
-        print "Non recoverable mismatches  %d" % self.non_recoverable_mismatches_
-        print "Correspondences             %d" % self.total_correspondences_
-        print ""
-        print "MOTP", self.getMOTP()
-        print "MOTA", self.getMOTA()
-        
+        print("Ground truths               %d" % self.total_groundtruths_)
+        print("False positives             %d" % self.false_positives_)
+        print("Misses                      %d" % self.misses_)
+        print("Mismatches                  %d" % self.mismatches_)
+        print("Recoverable mismatches      %d" % self.recoverable_mismatches_)
+        print("Non recoverable mismatches  %d" % self.non_recoverable_mismatches_)
+        print("Correspondences             %d" % self.total_correspondences_)
+        print("")
+        print("MOTP", self.getMOTP())
+        print("MOTA", self.getMOTA())
+        # print("FP IDs", self.false_positive_ids)
 
     def printLegacyFormat(self):
         """Print out as expected by score_all tool."""
         #TODO implement correspondences, faildCorrespondences and overlap_ratio 
-        print "DIFF TOTALS: groundT %.0f\t miss %.0f\t falseP %.0f\t mismatch %0.f" % (self.total_groundtruths_, self.misses_, self.false_positives_, self.mismatches_)
-        print "ABS TOTALS: groundT %.0f\t corr %.0f\t failedCorr %.0f\t overlap_ratio %.2f\t miss %.0f\t falseP %.0f\t mismatch %0.f" % (self.total_groundtruths_, 0, 0, 0, self.misses_, self.false_positives_, self.mismatches_)
+        print("DIFF TOTALS: groundT %.0f\t miss %.0f\t falseP %.0f\t mismatch %0.f" % (self.total_groundtruths_, self.misses_, self.false_positives_, self.mismatches_))
+        print("ABS TOTALS: groundT %.0f\t corr %.0f\t failedCorr %.0f\t overlap_ratio %.2f\t miss %.0f\t falseP %.0f\t mismatch %0.f" % (self.total_groundtruths_, 0, 0, 0, self.misses_, self.false_positives_, self.mismatches_))
 
 
     def convertIDsToString(self):
@@ -593,10 +624,10 @@ if __name__ == "__main__":
             sys.exit()
 
     evaluator.evaluate()
-    print "Track statistics"
+    print("Track statistics")
     evaluator.printTrackStatistics()
-    print 
-    print "Results"
+    print ()
+    print("Results")
     evaluator.printResults()
 #    evaluator.printLegacyFormat()
 
